@@ -2,7 +2,7 @@
 """
 tdc_vmag_window.py - vMag 창 프로세스 (설계 결정_D57, D58, D65)
 
-보기 3 가지(실시간, 구간 평균, 최근 평균), 곡선 5 개 캡처, 체크된 캡처만 삭제.
+보기 3 가지(실시간, 구간 평균, 최근 평균), 곡선 10 개 캡처 (이름을 고쳐 쓸 수 있다), 체크된 캡처만 삭제.
 main 은 ('frames', [32 밴드 x 8 프레임]) 을 보낸다. 설계 화면 견본에서 옮겼다.
 """
 
@@ -22,10 +22,11 @@ TDC_VMAG_TICKS = ((1, "1"), (10, "10"), (100, "100"), (1000, "1k"), (10000, "10k
 
 
 def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 보내는 통로 (vMag 창은 쓰지 않는다)
-    """vMag 창 프로세스. 보기 방식 3 가지, 곡선 5 개 캡처와 체크박스"""
+    """vMag 창 프로세스. 보기 방식 3 가지, 곡선 10 개 캡처와 체크박스"""
     tk, ttk, np, Figure, FigureCanvasTkAgg = tdc_graph_setup()
 
-    colors = ["#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
+    colors = ["#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b",
+              "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#000000"]      # 캡처 번호마다 하나 (TDC_CAPTURE_MAX 개)
     root = tk.Tk()
     root.title("vMag")
     root.geometry("980x600+920+40")
@@ -44,7 +45,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
 
     side = ttk.Frame(root, padding=6)
     side.pack(side="right", fill="y")
-    ttk.Label(side, text="캡처 (5 개까지)").pack(anchor="w")
+    ttk.Label(side, text="캡처 (%d 개까지)" % TDC_CAPTURE_MAX).pack(anchor="w")
 
     fig = Figure(figsize=(7.6, 5.0), dpi=100)
     ax = fig.add_subplot(111)
@@ -67,7 +68,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
 
     st = {"count": 0, "sum": np.zeros(TDC_BANDS), "n": 0, "win": collections.deque(),
           "shown": np.zeros(TDC_BANDS), "last_mode": "live", "last_n": 500, "dirty": False, "last": 0.0}
-    caps = []       # {"slot", "line", "var", "check"}
+    caps = []       # {"slot", "line", "var", "name", "row"}
 
     def vmag_plot(values):
         """그릴 값: log10. 1 보다 작은 값 (0) 은 1 (아래 끝) 로 올린다. 새 배열이라 캡처는 복사본이 된다"""
@@ -114,9 +115,18 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
             c["line"].set_visible(bool(c["var"].get()))
         refresh_legend()
 
+    def on_rename(c):
+        """이름 칸의 글을 곡선 이름 (범례) 으로 쓴다. 비우면 전 이름으로 되돌린다"""
+        text = c["name"].get().strip()
+        if not text:
+            c["name"].set(c["line"].get_label())
+        elif text != c["line"].get_label():
+            c["line"].set_label(text)
+            refresh_legend()
+
     def on_capture():
         if len(caps) >= TDC_CAPTURE_MAX:
-            info.set("캡처 5 개가 찼습니다. 삭제한 뒤 캡처하세요")
+            info.set("캡처 %d 개가 찼습니다. 삭제한 뒤 캡처하세요" % TDC_CAPTURE_MAX)
             return
         used = [c["slot"] for c in caps]
         k = [s for s in range(TDC_CAPTURE_MAX) if s not in used][0]     # 비어 있는 가장 앞 번호 (색도 이 번호를 따른다)
@@ -124,9 +134,16 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
         label = "캡처 %d (%s, %s)" % (k + 1, names[mode.get()], time.strftime("%H:%M:%S"))
         line, = ax.plot(x, vmag_plot(st["shown"]), color=colors[k], linewidth=1.4, linestyle="--", label=label)
         var = tk.IntVar(value=1)
-        check = tk.Checkbutton(side, text=label, variable=var, command=on_check, fg=colors[k], anchor="w")
-        check.pack(anchor="w")
-        caps.append({"slot": k, "line": line, "var": var, "check": check})
+        name = tk.StringVar(value=label)
+        row = ttk.Frame(side)
+        row.pack(anchor="w")
+        tk.Checkbutton(row, variable=var, command=on_check).pack(side="left")
+        entry = tk.Entry(row, textvariable=name, width=30, fg=colors[k])    # 이름 칸. Enter 나 다른 곳 클릭으로 범례에 반영
+        entry.pack(side="left")
+        cap = {"slot": k, "line": line, "var": var, "name": name, "row": row}
+        entry.bind("<Return>", lambda e, c=cap: (on_rename(c), root.focus_set()))
+        entry.bind("<FocusOut>", lambda e, c=cap: on_rename(c))
+        caps.append(cap)
         info.set("")
         refresh_legend()
 
@@ -136,7 +153,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
         for c in caps:
             if c["var"].get():
                 c["line"].remove()
-                c["check"].destroy()
+                c["row"].destroy()
             else:
                 keep.append(c)
         if len(keep) == len(caps):
@@ -185,10 +202,12 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
         root.after(2000, lambda: caps[0]["var"].set(0) or on_check())
         root.after(2200, on_clear)          # 체크된 캡처 2 만 지워지고 캡처 1 은 남는다
         root.after(2400, on_capture)        # 비어 있는 번호 2 로 다시 들어간다
+        root.after(2600, lambda: caps[0]["name"].set("ma on") or on_rename(caps[0]))
 
         def check_result():
             slots = sorted(c["slot"] for c in caps)
             assert slots == [0, 1], slots
+            assert caps[0]["line"].get_label() == "ma on", caps[0]["line"].get_label()
             assert st["count"] > 0 and not vmag_idle.get_visible(), st["count"]
             print("selftest vmag: capture slots %s, frames %d" % ([s + 1 for s in slots], st["count"]), flush=True)
         root.after(2800, check_result)

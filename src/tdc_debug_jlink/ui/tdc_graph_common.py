@@ -7,7 +7,7 @@ tdc_graph_common.py - 그래프 창 공통 (상수, matplotlib 준비, 주기 �
 """
 
 TDC_BANDS = 32               # vMag 밴드 수
-TDC_CAPTURE_MAX = 5          # 그래프에 고정할 수 있는 곡선 수
+TDC_CAPTURE_MAX = 10         # 그래프에 고정할 수 있는 곡선 수
 TDC_QUEUE_MAX = 400          # 통로 길이. 넘으면 main 이 버린다
 TDC_DMIC_SR = 16000          # DMIC 샘플 속도 (Hz)
 TDC_DMIC_FRAME = 512         # DMIC 버퍼 하나 (32 ms)
