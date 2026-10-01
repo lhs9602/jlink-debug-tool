@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+logs/
+# 개발용. 저장소에 올리지 않는다 (설계 결정_D83)
+/CLAUDE.md
+/docs/자료/
+/docs/지침/
+/docs/tasks/
+/docs/가이드/README.md
+/examples/
+/reference/
+/tests/
+/src/tdc_debug_jlink/link/tdc_fake_link.py
