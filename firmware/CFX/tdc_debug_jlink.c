@@ -79,7 +79,7 @@ void tdc_debug_jlink_register(void)
  * 그 안에서 dmic_inj_enable 로 방향을 고른다 (0 기록, 1 주입)
  * 기록은 버퍼가 두 개인 것과 missing_cnt 말고는 동료 sound1-dnn 의 td_dnn_extract_dmic() 과 같다.
  * 주입은 믹서 결과를 덮어쓴다 (믹서 뒤, 동료 sound1-dnn 의 td_dnn_bypass_mic() 과 같은 자리).
- * 그래서 주입 샘플은 입력 LPF 를 거치지 않고 AGC 부터 거친다.
+ * 믹서를 건너뛰므로 입력 LPF (2-tap 이동평균) 는 주입 함수 안에서 같은 식으로 건다 (마이크에 걸리는 1 ms 에만).
  * ------------------------------------------------------------------------- */
 
 /* 기록 (dmic_inj_enable 0 일 때). use_earpiece 가 0 이면 DMIC(FIFO A0_0), 1 이면 이어피스(FIFO A0_1) 16 샘플을 쓴다 */
@@ -125,10 +125,16 @@ static void tdc_debug_jlink_dmic_capture(int use_earpiece)
     }
 }
 
-/* 주입 (dmic_inj_enable 1 일 때). 믹서 결과를 주입 샘플 16 개로 바꾼다 */
-static void tdc_debug_jlink_dmic_inject(void)
+/* 주입의 입력 LPF 용: 직전 주입 샘플 (시프트 전). 다 꺼낸 버퍼는 PC 가 다시 채우므로 따로 둔다. 무음과 기록 중에는 0 */
+static int _XMEM s_tdc_debug_jlink_inj_prev = 0;
+
+/* 주입 (dmic_inj_enable 1 일 때). 믹서 결과를 주입 샘플 16 개로 바꾼다.
+ * use_lpf 가 1 이면 audio_mix_internal_mic_only_2_tap_moving_average_lpf() 와 같은 식으로 직전 샘플과 평균한다 */
+static void tdc_debug_jlink_dmic_inject(int use_lpf)
 {
     int _XMEM *p_mix = (int _XMEM *) HEAR_ADDR_AUDIO_MIX;
+    int prev = s_tdc_debug_jlink_inj_prev;
+    int cur;
     int w = TDC_DEBUG_JLINK_AREA->dmic.dmic_cur_buf;         /* 꺼낼 버퍼 (0 / 1) */
     int local_pos = TDC_DEBUG_JLINK_AREA->dmic.dmic_pos;     /* 그 버퍼 안의 다음 위치 (0 ~ 511) */
     int full = TDC_DEBUG_JLINK_AREA->dmic.dmic_buf_full[w];  /* 1 = PC 가 채웠다, 0 = 아직 비어 있다 */
@@ -144,16 +150,30 @@ static void tdc_debug_jlink_dmic_inject(void)
             }
             else
             {
-                p_mix[(df_inputADC_DataBuffLength - 1) - i] = TDC_DEBUG_JLINK_AREA->dmic.dmic_buf[w][local_pos + i] >> AUDIO_INPUT_RSHIFT;
+                cur = TDC_DEBUG_JLINK_AREA->dmic.dmic_buf[w][local_pos + i];
+
+                if (use_lpf)
+                {
+                    p_mix[(df_inputADC_DataBuffLength - 1) - i] = (cur + prev) >> (AUDIO_INPUT_RSHIFT + 1);
+                }
+                else
+                {
+                    p_mix[(df_inputADC_DataBuffLength - 1) - i] = cur >> AUDIO_INPUT_RSHIFT;
+                }
+
+                prev = cur;
             }
         }
 
     if (full == 0)
     {
         /* PC 가 아직 채우지 않았다 (늦었다). dmic_pos, dmic_cur_buf 는 그대로 두고 기다린다. 그 횟수를 센다 (기록과 같은 칸) */
+        s_tdc_debug_jlink_inj_prev = 0;
         TDC_DEBUG_JLINK_AREA->dmic.dmic_missing_cnt++;
         return;
     }
+
+    s_tdc_debug_jlink_inj_prev = prev;
 
     local_pos = local_pos + df_inputADC_DataBuffLength;
 
@@ -176,11 +196,17 @@ void tdc_debug_jlink_dmic(int use_earpiece)
 {
     if (TDC_DEBUG_JLINK_AREA->dmic.dmic_inj_enable == 0)
     {
+        s_tdc_debug_jlink_inj_prev = 0; /* 주입을 다시 켠 첫 샘플에 앞 주입의 값이 섞이지 않게 */
         tdc_debug_jlink_dmic_capture(use_earpiece);
     }
     else
     {
-        tdc_debug_jlink_dmic_inject();
+#if TDC_2_TAP_MOVING_AVERAGE_LPF_ENABLE
+        /* g_2_tap_lpf_active 는 main.c 가 이번 1 ms 의 믹서 앞에서 정한다 (이어피스 가지에서는 갱신하지 않아 따로 본다) */
+        tdc_debug_jlink_dmic_inject((use_earpiece == 0) && (g_2_tap_lpf_active != 0));
+#else
+        tdc_debug_jlink_dmic_inject(0);
+#endif
     }
 }
 

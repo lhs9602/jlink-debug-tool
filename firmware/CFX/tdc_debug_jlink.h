@@ -88,6 +88,7 @@ typedef struct
  * 주입 (dmic_inj_enable 1). 방향만 반대다
  * - PC 가 dmic_buf_full 이 0 인 버퍼에 512 샘플(시간 순서, 입력 FIFO 단위)을 채우고 1 을 쓴다.
  * - CFX 는 1 ms 마다 dmic_buf[dmic_cur_buf][dmic_pos] 부터 16 샘플을 꺼내 FIFO 순서로 뒤집어 믹서 결과 대신 쓴다.
+ *   마이크에 입력 LPF (2-tap 이동평균) 가 걸리는 1 ms 에는 주입 샘플에도 같은 식으로 건다.
  * - 512 를 다 꺼내면 그 버퍼의 dmic_buf_full 을 0 으로 두고 다른 버퍼로 옮기며 CM3 에 알린다.
  * - 꺼낼 버퍼가 비어 있으면 그 1 ms 는 무음, dmic_missing_cnt 를 1 늘리고 그 자리에서 기다린다.
  * - PC 시작 순서: dmic_inj_enable 0 -> dmic_buf_full 1, 1 (기록 멈춤) -> 2 ms 기다림 -> 두 버퍼 채움

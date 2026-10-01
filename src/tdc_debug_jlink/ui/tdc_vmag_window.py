@@ -13,7 +13,8 @@ import time
 
 from .tdc_graph_common import (TDC_BANDS, TDC_CAPTURE_MAX, TDC_DMIC_FRAME, TDC_DMIC_FULL_SCALE, TDC_DMIC_HIST_SEC,
                                TDC_DMIC_MAX_BINS, TDC_DMIC_SR, TDC_DMIC_STATS_SEC, TDC_DMIC_WAVE_SEC, TDC_IDLE_SEC,
-                               TDC_NOISE_GATE_SPL, TDC_ROTATION_SPL, TDC_SPL_OFFSET_DB, tdc_graph_loop, tdc_graph_setup)
+                               TDC_NOISE_GATE_SPL, TDC_ROTATION_SPL, TDC_SPL_OFFSET_DB, TdcFastCanvas, tdc_graph_loop,
+                               tdc_graph_setup)
 
 TDC_VMAG_MAX = (1 << 23) - 1    # vMag 최대. CFX 24 비트 int, sqrt(Re^2 + Im^2) 라 0 이상 (1.5 FrequencyAnalysis.c:79-81)
 TDC_VMAG_TICKS = ((1, "1"), (10, "10"), (100, "100"), (1000, "1k"), (10000, "10k"), (100000, "100k"),
@@ -38,7 +39,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
     ttk.Label(top, text="   프레임 수 N").pack(side="left")
     n_var = tk.StringVar(value="500")
     ttk.Spinbox(top, from_=1, to=10000, increment=50, width=7, textvariable=n_var).pack(side="left", padx=4)
-    info = tk.StringVar(value="받은 프레임 0")
+    info = tk.StringVar(value="")       # 알림 글 (캡처가 찼을 때, 삭제할 것을 체크하지 않았을 때)
     ttk.Label(top, textvariable=info).pack(side="right")
 
     side = ttk.Frame(root, padding=6)
@@ -62,6 +63,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
                         ha="center", va="center", fontsize=13, color="#888888")
     canvas = FigureCanvasTkAgg(fig, master=root)
     canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
+    fast = TdcFastCanvas(root, canvas, fig, [live_line, vmag_idle])     # 바뀌는 것만 다시 그린다
 
     st = {"count": 0, "sum": np.zeros(TDC_BANDS), "n": 0, "win": collections.deque(),
           "shown": np.zeros(TDC_BANDS), "last_mode": "live", "last_n": 500, "dirty": False, "last": 0.0}
@@ -105,7 +107,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
     def refresh_legend():
         handles = [live_line] + [c["line"] for c in caps if c["var"].get()]
         ax.legend(handles=handles, loc="upper right", fontsize=8)
-        canvas.draw_idle()
+        fast.redraw()                   # 범례와 캡처 곡선은 배경이라 전체를 다시 그린다
 
     def on_check():
         for c in caps:
@@ -125,6 +127,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
         check = tk.Checkbutton(side, text=label, variable=var, command=on_check, fg=colors[k], anchor="w")
         check.pack(anchor="w")
         caps.append({"slot": k, "line": line, "var": var, "check": check})
+        info.set("")
         refresh_legend()
 
     def on_clear():
@@ -140,8 +143,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
             info.set("삭제할 캡처를 체크하세요")
             return
         caps[:] = keep
-        if info.get().startswith("캡처 5"):
-            info.set("받은 프레임 %d" % st["count"])
+        info.set("")
         refresh_legend()
 
     ttk.Button(top, text="캡처", command=on_capture).pack(side="left", padx=(16, 4))
@@ -173,9 +175,7 @@ def tdc_vmag_window(from_main, selftest, to_main=None):     # to_main: main 에 
             live_line.set_ydata(vmag_plot(st["shown"]))
             redraw = True
         if redraw:
-            canvas.draw_idle()
-        if not info.get().startswith(("캡처 5", "삭제할 캡처")):
-            info.set("받은 프레임 %d" % st["count"])
+            fast.update()
 
     close_window = tdc_graph_loop(root, tick, 40)
     if selftest:

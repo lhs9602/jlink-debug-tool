@@ -8,8 +8,8 @@ tdc_commands.py - pylink 터미널 명령 (main 프로세스에서 J-Link 스레
 
 from ..link.tdc_memory import TdcWriteDisabled, tdc_read_words, tdc_user_write
 
-TDC_HELP = (
-    "명령\n"
+TDC_HELP_PYLINK = (
+    "[pylink 명령]\n"
     "  help                      이 목록\n"
     "  status                    연결, 블록, 켠 기능\n"
     "  read 주소 [개수]           32 비트 워드 읽기 (16 진). 예: read 0x21010000 4\n"
@@ -21,6 +21,23 @@ TDC_HELP = (
     "  log N                     종합 로그 간격 (초). 동작 중일 때만 나온다\n"
     "  perf                      측정: 루프, 알림 처리, J-Link 호출 시간 (지난 perf 뒤). 보고 나면 0 부터\n"
 )
+
+# RTT 명령은 펌웨어가 정한다 (도구는 누른 키를 그대로 보낸다). 아래 목록은 Sullivan 1.5 CM3 main.c 의
+# RTT 입력 처리 (SEGGER_RTT_Read 뒤의 키 비교) 에서 옮겼다 (2026-10-01). 펌웨어의 키가 바뀌면 여기도 고친다
+TDC_HELP_RTT = (
+    "[RTT 명령]\n"
+    "  0 ~ 9                     오디오 볼륨 (누른 숫자 + 1)\n"
+    "  e                         모든 맵 지우기\n"
+    "  l                         이벤트 로그 읽기\n"
+    "  x                         데이터 로깅 오류 만들기\n"
+    "  t                         무결성 오류 이벤트 로그 쓰기\n"
+    "  f                         오디오 입력 LPF (2-tap 이동평균) 켜고 끄기. 맵 4 번은 항상 켠다\n"
+    "  v                         vMag cos 가중 켜고 끄기\n"
+    "  m                         지금 자극에 쓰는 맵 값 출력\n"
+    "  d                         LPF 전후 16 샘플 덤프 요청 (1 차 IIR 빌드에서만)\n"
+)
+
+TDC_HELP = TDC_HELP_PYLINK + "\n" + TDC_HELP_RTT
 
 TDC_ID_DMIC = 1
 TDC_ID_VMAG = 2

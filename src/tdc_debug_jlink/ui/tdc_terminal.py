@@ -6,7 +6,8 @@ tdc_terminal.py - 터미널 창 (설계 결정_D61, D62, D65, D66)
 오른쪽 pylink 터미널 (입력 칸에 명령, Enter). 이 창을 닫으면 전부 끝난다 (main 과 그래프 창도).
 그래프 창은 main 이 ('open', 기능) 을 보내면 연다 (capture ... on 이 받아들여졌을 때). 창을 닫으면 capture ... off 를 보낸다.
 그래프 창에는 main 에 보내는 통로(명령 통로)도 넘긴다. DMIC 창은 주입 조작을 이 통로로 보낸다 (결정_D76).
-종합 로그는 스크롤을 내리지 않고, 명령의 답은 바로 보이게 내린다.
+새 글이 붙을 때 스크롤이 맨 아래에 있으면 따라 내려가고, 위로 올려 보고 있으면 그 자리에 둔다 (RTT, pylink 모두. 결정_D85).
+친 명령은 맨 아래로 내린다.
 설계 화면 견본에서 옮겼다. J-Link 를 만지지 않는다.
 """
 
@@ -59,7 +60,7 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
 
     root = tk.Tk()
     root.title("RTT + pylink 터미널" + title_note)
-    root.geometry("1180x600")
+    root.geometry("1460x600")
     root.configure(bg=TDC_UI["bg"])
     style = ttk.Style(root)
     style.theme_use("clam")                              # 스크롤바 색을 바꿀 수 있는 테마 (이 창에만)
@@ -148,13 +149,27 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
         root.clipboard_clear()
         root.clipboard_append(sel)
 
-    def put(text_widget, s, follow=True, tag=None):
-        """follow 가 거짓이면 스크롤을 건드리지 않는다. 보던 자리가 그대로 남는다"""
+    follow = set()      # 글이 붙은 글 상자 가운데 맨 아래로 내릴 것. scroll_down 이 한 번에 내린다
+
+    def at_bottom(text_widget):
+        """스크롤이 맨 아래에 있는가 (글의 끝이 보이는가)"""
+        return text_widget.yview()[1] >= 1.0
+
+    def put(text_widget, s, tag=None, force=False):
+        """글을 끝에 붙인다. 붙이기 전에 스크롤이 맨 아래에 있었으면 따라 내려가고, 위로 올려 보고 있었으면 보던 자리가
+        그대로 남는다. force 가 참이면 스크롤 위치와 관계없이 내린다 (친 명령). 내리는 것은 scroll_down 이 한다"""
+        if force or at_bottom(text_widget):
+            follow.add(text_widget)
         text_widget.configure(state="normal")
         text_widget.insert("end", s, tag) if tag else text_widget.insert("end", s)
-        if follow:
-            text_widget.see("end")
         text_widget.configure(state="disabled")
+
+    def scroll_down():
+        """표시해 둔 글 상자를 맨 아래로 내린다. 글을 붙인 뒤의 see 는 화면 배치를 다시 계산해 느리다 (한 번에 약 2 ms).
+        글마다 부르면 RTT 글이 많을 때 창이 밀리므로, 한 번의 처리 끝에 글 상자마다 한 번만 부른다"""
+        for text_widget in follow:
+            text_widget.see("end")
+        follow.clear()
 
     ansi = {"fg": None, "bright": False, "pending": ""}
 
@@ -178,12 +193,15 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
                 ansi["fg"] = p
 
     def put_rtt(s):
-        """RTT 글. ANSI 색 코드를 글자색으로 바꾼다. 조각 끝에서 잘린 코드는 다음 조각과 합친다"""
+        """RTT 글. ANSI 색 코드를 글자색으로 바꾼다. 조각 끝에서 잘린 코드는 다음 조각과 합친다.
+        스크롤은 put 과 같다"""
         s = ansi["pending"] + s.replace("\r\n", "\n").replace("\r", "")
         ansi["pending"] = ""
         cut = s.rfind("\x1b")
         if cut != -1 and not TDC_ANSI_RE.match(s, cut) and len(s) - cut < 16:
             ansi["pending"], s = s[cut:], s[:cut]
+        if at_bottom(rtt_text):
+            follow.add(rtt_text)
         rtt_text.configure(state="normal")
         pos = 0
         for m in TDC_ANSI_RE.finditer(s):
@@ -200,7 +218,6 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
             table = TDC_ANSI_BRIGHT if ansi["bright"] else TDC_ANSI_NORMAL
             tag = ansi_tag(table[ansi["fg"]]) if ansi["fg"] else None
             rtt_text.insert("end", chunk, tag) if tag else rtt_text.insert("end", chunk)
-        rtt_text.see("end")
         rtt_text.configure(state="disabled")
 
     def send(item):
@@ -222,7 +239,8 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
         send(("rtt_in", ch))
 
     def on_cmd(line):
-        put(cmd_text, "> %s\n" % line, tag="echo")
+        put(cmd_text, "> %s\n" % line, tag="echo", force=True)     # 친 명령은 맨 아래로 내린다 (답이 보이게)
+        scroll_down()
         send(("cmd", line))
 
     left, rtt_text, _unused = make_side("RTT 터미널", TDC_UI, on_rtt,
@@ -234,36 +252,46 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
     pane.add(left, minsize=300)
     pane.add(right, minsize=300)
     root.update_idletasks()
-    pane.sash_place(0, 640, 0)
+    pane.sash_place(0, 728, 0)
     cmd_entry.focus_set()
 
     auto_off = []       # 창이 닫혀 끈 기능 (점검용)
 
     def tick():
+        rtt_parts = []      # 이어서 온 RTT 글. 모아서 한 번에 붙인다
+
+        def put_rtt_parts():
+            if rtt_parts:
+                put_rtt("".join(rtt_parts))
+                rtt_parts.clear()
+
         try:
             while True:
                 kind, s = to_term.get_nowait()
                 if kind == "rtt":
-                    put_rtt(s)
+                    rtt_parts.append(s)
                 elif kind == "rtt_note":
+                    put_rtt_parts()
                     put(rtt_text, "[연결] %s\n" % s, tag=ansi_tag(TDC_NOTE_COLOR))   # 연결, 끊김, RTT 시작
                 elif kind == "cmd":
-                    put(cmd_text, s)                    # 명령에 대한 답: 바로 보이게 내린다
+                    put(cmd_text, s)                    # 명령에 대한 답, 자동 알림
                 elif kind == "log":
-                    put(cmd_text, s, follow=False, tag="log")   # 종합 로그: 스크롤을 내리지 않는다
+                    put(cmd_text, s, tag="log")         # 종합 로그
                 elif kind == "status":
                     set_status(s)
                 elif kind == "open":
                     open_window(s)
         except queue.Empty:
             pass
+        put_rtt_parts()
         for key, w in windows.items():
             if w["proc"] is not None and not w["proc"].is_alive():
                 # 그래프 창이 닫혔다: 그 기능의 가져오기도 끈다
                 w["proc"] = None
                 send(("cmd", "capture %s off" % key))
-                put(cmd_text, "%s 창이 닫혀 capture %s off\n" % (w["name"], key), follow=False, tag="note")
+                put(cmd_text, "%s 창이 닫혀 capture %s off\n" % (w["name"], key), tag="note")
                 auto_off.append(key)
+        scroll_down()
         if not main_proc.is_alive():
             set_status("main 프로세스 끊김")
         root.after(20, tick)

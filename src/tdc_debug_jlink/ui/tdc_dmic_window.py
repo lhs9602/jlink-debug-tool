@@ -5,7 +5,7 @@ tdc_dmic_window.py - DMIC 창 프로세스 (설계 결정_D63, D65)
 기존 DMIC 도구(dmic_realtime_visualizer_optimized.py)의 화면을 따른다: 파형(최근 3 초, 결정_D73), 레벨 기록, 수치 글, Reset hold.
 아래 줄에서 주입을 켜고 끈다 (원천 목록, 버튼, 상태 글, 결정_D76). 창은 요청만 main 에 보내고 버튼은 main 의 답을 보고 바꾼다.
 main 은 ('dmic', (시간 순서 샘플, 놓친 ms)) 를 보낸다. 주입 중에는 주입한 샘플과 무음 ms 다 (무음만큼 0 이 앞에 붙는다, 결정_D71).
-파형 창보다 긴 덩어리 (주입 무음이 길었을 때) 는 끝의 파형 창 길이만 그린다. 놓친 ms 는 그대로 센다.
+파형 창보다 긴 덩어리 (주입 무음이 길었을 때) 는 끝의 파형 창 길이만 그린다. 놓친 ms 는 이 창에서 쓰지 않는다 (터미널의 종합 로그가 낸다).
 주입 상태는 ('dmic_state', {'inject': 이름 또는 None, 'error': 글, 'data_dir': WAV 폴더}) 로 온다. 설계 화면 견본에서 옮겼다.
 """
 
@@ -17,7 +17,11 @@ import time
 from .tdc_graph_common import (TDC_BANDS, TDC_CAPTURE_MAX, TDC_DMIC_FRAME, TDC_DMIC_FULL_SCALE, TDC_DMIC_HIST_SEC,
                                TDC_DMIC_MAX_BINS, TDC_DMIC_SR, TDC_DMIC_STATS_SEC, TDC_DMIC_WAVE_SEC, TDC_IDLE_SEC,
                                TDC_INJECT_CHOICES, TDC_INJECT_FREQS, TDC_INJECT_WAV, TDC_NOISE_GATE_SPL, TDC_ROTATION_SPL,
-                               TDC_SPL_OFFSET_DB, tdc_graph_loop, tdc_graph_setup)
+                               TDC_SPL_OFFSET_DB, TdcFastCanvas, tdc_graph_loop, tdc_graph_setup)
+
+
+TDC_DMIC_WAITING = "waiting for DMIC ... (capture dmic on)"
+TDC_DMIC_STATS_LINES = 3        # 수치 글의 줄 수 (peak, rms, AGC region)
 
 
 def tdc_dmic_window(from_main, selftest, to_main=None):
@@ -25,12 +29,11 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
       파형 (검은 바탕, 점선은 AGC 경계), 레벨 기록 (영역 색 3 개, peak / rms), 수치 글.
       DNN 보정용인 fmax, crest, scenario 기록 (Record, Stop, Summary) 은 뺐다."""
     tk, ttk, np, Figure, FigureCanvasTkAgg = tdc_graph_setup()
+    from matplotlib.collections import PolyCollection
 
     gate_fs = 10.0 ** ((TDC_NOISE_GATE_SPL - TDC_SPL_OFFSET_DB) / 20.0)
     rot_fs = 10.0 ** ((TDC_ROTATION_SPL - TDC_SPL_OFFSET_DB) / 20.0)
     agc_block = 16                                   # AGC 가 보는 블록 (1 ms)
-    block_ms = 1000.0 * agc_block / TDC_DMIC_SR
-    frame_blocks = TDC_DMIC_FRAME // agc_block       # 버퍼 하나 = 32 ms
     wave_n = int(TDC_DMIC_SR * TDC_DMIC_WAVE_SEC)
     stats_n = int(TDC_DMIC_SR * TDC_DMIC_STATS_SEC)
     hist_n = int(TDC_DMIC_HIST_SEC * TDC_DMIC_SR / TDC_DMIC_FRAME)
@@ -45,14 +48,20 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
     root.geometry("860x780+40+40")
     dctl = ttk.Frame(root, padding=4)
     dctl.pack(side="bottom", fill="x")
+    # 수치 글은 matplotlib 그림이 아니라 Tk 글로 낸다 (그림 안의 글은 그릴 때마다 느리다). 줄 수를 고정해 글이 바뀌어도 그림 크기가 그대로다
+    stats = tk.StringVar(value=TDC_DMIC_WAITING)
+    tk.Label(root, textvariable=stats, font=("Consolas", 9), height=TDC_DMIC_STATS_LINES, anchor="nw", justify="left",
+             padx=12).pack(side="bottom", fill="x")
 
-    dfig = Figure(figsize=(8.4, 7.0), dpi=100)
-    dgrid = dfig.add_gridspec(3, 1, height_ratios=[1.2, 1.2, 0.5], hspace=0.45,
-                              left=0.10, right=0.97, top=0.95, bottom=0.02)
+    dfig = Figure(figsize=(8.4, 6.4), dpi=100)
+    dgrid = dfig.add_gridspec(2, 1, hspace=0.36, left=0.10, right=0.97, top=0.95, bottom=0.08)
     ax_wav = dfig.add_subplot(dgrid[0, 0])
     guides = [(ax_wav.axhline(s * lv, color="0.5", ls="--", lw=0.7), s * lv)
               for lv in (gate_fs, rot_fs) for s in (1, -1)]
-    line_wav, = ax_wav.plot([], [], color="cyan", lw=1)
+    # 파형은 화면 한 칸마다 세로 막대 (그 칸의 최소 ~ 최대) 를 세운 면 하나로 그린다.
+    # 선으로 이으면 소리가 촘촘할 때 느리다 (잰 값: 선 34 ~ 61 ms, 면 1 ~ 10 ms)
+    wave = PolyCollection([], facecolors="cyan", edgecolors="none")
+    ax_wav.add_collection(wave)
     ax_wav.set_xlim(-TDC_DMIC_WAVE_SEC, 0)
     ax_wav.set_ylim(-1.0, 1.0)                       # 고정. 파형을 지금 눈금 (y_limit) 으로 나눠 그린다
     ax_wav.set_yticks([-1.0, -0.5, 0.0, 0.5, 1.0])
@@ -80,17 +89,16 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
     ax_spl.legend(loc="upper left", fontsize=8)
     ax_spl.grid(alpha=0.3)
 
-    ax_txt = dfig.add_subplot(dgrid[2, 0])
-    ax_txt.axis("off")
-    txt = ax_txt.text(0.0, 0.98, "", transform=ax_txt.transAxes, va="top", family="Consolas", fontsize=9)
     dcanvas = FigureCanvasTkAgg(dfig, master=root)
     dcanvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+    # 바뀌는 것만 다시 그린다. 적은 순서로 그린다: 점선, 파형, 세로 눈금 글, 비활성 글, 레벨 곡선
+    fast = TdcFastCanvas(root, dcanvas, dfig,
+                         [g for g, _v in guides] + [wave, y_top, y_bot, wav_idle, line_pk, line_rms])
 
     dm = {"buf": np.zeros(wave_n, dtype=np.float32), "filled": 0, "frames": 0, "dirty": False, "last": 0.0,
           "hist_t": collections.deque(maxlen=hist_n), "hist_pk": collections.deque(maxlen=hist_n),
           "hist_rms": collections.deque(maxlen=hist_n), "y_limit": 1.0, "y_init": False, "y_t": time.time(),
-          "reset": False, "last_stats": 0.0, "window": None,
-          "gaps": [], "recent": collections.deque(), "missed": 0}
+          "reset": False, "last_stats": 0.0, "window": None}
 
     def to_dbfs(amp):
         return 20.0 * math.log10(amp) if amp > 0 else float("-inf")
@@ -124,48 +132,21 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
                 "blk_gate": gate, "blk_amp": amp, "blk_atten": atten}
 
     def envelope(samples, max_bins):
-        """칸마다 최소와 최대를 시간 순서대로 남긴다. 그리는 점만 줄이고 원본은 그대로다"""
+        """칸마다 최소와 최대를 남긴다: (칸 하나의 샘플 수, 최소, 최대). 그리는 점만 줄이고 원본은 그대로다"""
         n = len(samples)
         step = max(1, (n + max_bins - 1) // max_bins)
-        if n == 0 or step == 1:
-            return np.arange(n), samples
         full = n // step
         blocks = samples[:full * step].reshape(full, step)
-        base = np.arange(full) * step
-        low = base + blocks.argmin(axis=1)
-        high = base + blocks.argmax(axis=1)
-        idx = np.column_stack((np.minimum(low, high), np.maximum(low, high))).ravel()
-        return idx, samples[idx]
-
-    def kept_pct(n_frames, missed):
-        kept = n_frames * frame_blocks
-        return 100.0 * kept / (kept + missed) if (kept + missed) else float("nan")
-
-    def lost_text():
-        if not dm["gaps"]:
-            return "lost   -"
-        n1 = len(dm["recent"])
-        m1 = sum(d for _, d in dm["recent"])
-        n_all = len(dm["gaps"])
-        total_ms = (n_all * frame_blocks + dm["missed"]) * block_ms
-        return ("lost   last gap %5.0f ms    last 1 s: kept %5.1f %%   lost %5.0f ms\n"
-                "total  kept %5.1f %%   lost %.0f of %.0f ms   frames %d   late 0" % (
-                    dm["gaps"][-1] * block_ms, kept_pct(n1, m1), m1 * block_ms,
-                    kept_pct(n_all, dm["missed"]), dm["missed"] * block_ms, total_ms, n_all))
+        return step, blocks.min(axis=1), blocks.max(axis=1)
 
     def feed_dmic(payload):
-        codes, missing = payload
+        codes, _missed_ms = payload                     # 놓친 ms 는 이 창에서 쓰지 않는다 (터미널의 종합 로그가 낸다)
         s = np.asarray(codes, dtype=np.float32) / float(TDC_DMIC_FULL_SCALE)
         tail = s[-wave_n:]                               # 파형 창보다 긴 덩어리 (주입 무음이 길었을 때) 는 끝의 창 길이만
         dm["buf"][:-len(tail)] = dm["buf"][len(tail):]
         dm["buf"][-len(tail):] = tail
         dm["filled"] = min(dm["filled"] + len(s), wave_n)
         now = time.time()
-        dm["gaps"].append(int(missing))
-        dm["missed"] += int(missing)
-        dm["recent"].append((now, int(missing)))
-        while dm["recent"] and now - dm["recent"][0][0] > 1.0:
-            dm["recent"].popleft()
         m = frame_metrics(s)
         if m:
             dm["hist_pk"].append(m["peak_spl"])
@@ -180,7 +161,7 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
         w = frame_metrics(dm["buf"][wave_n - n:]) if n else None
         dm["window"] = w
         if w is None:
-            txt.set_text("waiting for DMIC ... (capture dmic on)")
+            stats.set(TDC_DMIC_WAITING)
             return
         if dm["hist_t"]:
             tt = np.array(dm["hist_t"]) - dm["hist_t"][-1]
@@ -188,17 +169,18 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
             line_rms.set_data(tt, np.array(dm["hist_rms"]))
         region = ("GATED" if w["fmax_spl"] < TDC_NOISE_GATE_SPL else
                   "AMPLIFY" if w["fmax_spl"] < TDC_ROTATION_SPL else "ATTENUATION")
-        txt.set_text(
+        stats.set(
             "peak   %.6f   %6.1f dBFS   %5.1f dB SPL\n"
             "rms    %.6f   %6.1f dBFS   %5.1f dB SPL\n"
-            "AGC region: %-12s blocks gate/amp/atten = %.0f/%.0f/%.0f %%\n" % (
+            "AGC region: %-12s blocks gate/amp/atten = %.0f/%.0f/%.0f %%" % (
                 w["peak"], w["peak_dbfs"], w["peak_spl"], w["rms"], w["rms_dbfs"], w["rms_spl"],
-                region, w["blk_gate"], w["blk_amp"], w["blk_atten"]) + lost_text())
+                region, w["blk_gate"], w["blk_amp"], w["blk_atten"]))
 
     def draw_dmic():
         now = time.time()
-        idx, vals = envelope(dm["buf"], TDC_DMIC_MAX_BINS)
-        visible_peak = float(np.max(np.abs(vals))) if len(vals) else 0.0
+        # 칸 수는 화면의 가로 칸 수에 맞춘다 (더 잘게 나눠도 보이지 않는다)
+        step, low, high = envelope(dm["buf"], min(TDC_DMIC_MAX_BINS, max(int(ax_wav.bbox.width), 100)))
+        visible_peak = float(max(-low.min(), high.max()))
         desired = max(visible_peak * 1.25, 1e-6)
         if dm["filled"]:
             if not dm["y_init"] or dm["reset"] or desired >= dm["y_limit"]:
@@ -208,7 +190,15 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
                 dm["y_limit"] = max(desired, dm["y_limit"] * 0.9 ** ((now - dm["y_t"]) / 0.06))
         dm["y_t"] = now
         dm["reset"] = False
-        line_wav.set_data((idx - (wave_n - 1)) / float(TDC_DMIC_SR), vals / dm["y_limit"])
+        # 칸마다 세로 막대 (최소 ~ 최대). 옆 칸과 끊어져 보이지 않게 다음 칸에 닿도록 늘리고, 화면의 한 칸 두께는 남긴다
+        low, high = low / dm["y_limit"], high / dm["y_limit"]
+        bottom = np.minimum(low, np.append(high[1:], low[-1]))
+        top = np.maximum(high, np.append(low[1:], high[-1]))
+        top = np.maximum(top, bottom + 2.0 / max(ax_wav.bbox.height, 1.0))
+        edges = (np.arange(len(low) + 1) * step - (wave_n - 1)) / float(TDC_DMIC_SR)
+        x = np.repeat(edges, 2)[1:-1]                    # 칸의 왼쪽 끝, 오른쪽 끝
+        wave.set_verts([np.concatenate((np.column_stack((x, np.repeat(top, 2))),
+                                        np.column_stack((x[::-1], np.repeat(bottom, 2)[::-1]))))])
         for g, v in guides:
             g.set_ydata([v / dm["y_limit"], v / dm["y_limit"]])
         y_top.set_text("+%.2g" % dm["y_limit"])
@@ -280,22 +270,18 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
     inj_btn.configure(command=on_button)
 
     def on_state(st):
-        """main 의 주입 상태: 버튼, 상태 글, 파형 제목과 색. 주입 이름이 바뀌면 (켜기, 끄기, 원천 바꾸기) 손실 집계를 새로 시작한다."""
+        """main 의 주입 상태: 버튼, 상태 글, 파형 제목과 색"""
         name = st.get("inject")
         if st.get("data_dir"):
             ij["data_dir"] = st["data_dir"]
-        if name != ij["on"]:
-            dm["gaps"].clear()
-            dm["recent"].clear()
-            dm["missed"] = 0
         ij["on"] = name
         ij["wait"] = 0.0
         inj_btn.configure(text="주입 끄기" if name else "주입 켜기")
         inj_btn.state(["!disabled"])
         inj_msg.set(st.get("error") or (("주입: %s" % name) if name else "마이크"))
-        line_wav.set_color("orange" if name else "cyan")
+        wave.set_facecolor("orange" if name else "cyan")
         ax_wav.set_title(wave_title(name), fontsize=10)
-        dm["dirty"] = True
+        fast.redraw()                               # 제목은 배경이라 전체를 다시 그린다
 
     def tick():
         try:
@@ -316,7 +302,7 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
         if wav_idle.get_visible() == dmic_on:            # 상태가 바뀌었을 때만
             wav_idle.set_visible(not dmic_on)
             if not dmic_on:
-                txt.set_text("waiting for DMIC ... (capture dmic on)")
+                stats.set(TDC_DMIC_WAITING)
             redraw = True
         if dmic_on and (now - dm["last_stats"] >= 0.25 or dm["reset"]):
             dm["last_stats"] = now
@@ -327,7 +313,7 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
             draw_dmic()
             redraw = True
         if redraw:
-            dcanvas.draw_idle()
+            fast.update()
 
     close_window = tdc_graph_loop(root, tick, 60)
     if selftest:
@@ -337,10 +323,10 @@ def tdc_dmic_window(from_main, selftest, to_main=None):
 
         def check_result():
             assert dm["frames"] > 0 and not wav_idle.get_visible(), dm["frames"]
-            assert dm["window"] is not None and txt.get_text().count("\n") == 4, repr(txt.get_text())
+            assert dm["window"] is not None and stats.get().count("\n") == TDC_DMIC_STATS_LINES - 1, repr(stats.get())
             assert ij["on"] == TDC_INJECT_CHOICES[1], ij["on"]
             print("selftest dmic: buffers %d, rms %.1f dB SPL, text lines %d, 주입 %s" % (
-                dm["frames"], dm["window"]["rms_spl"], txt.get_text().count("\n") + 1, ij["on"]), flush=True)
+                dm["frames"], dm["window"]["rms_spl"], stats.get().count("\n") + 1, ij["on"]), flush=True)
         root.after(2800, check_result)
         root.after(3000, close_window)
     root.mainloop()

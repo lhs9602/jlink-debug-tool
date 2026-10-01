@@ -4,6 +4,7 @@ tdc_inject.py - 주입 (DMIC 의 옵션. 설계 결정_D69, D71, D74, D76)
 
 주입 샘플은 DMIC 블록의 더블 버퍼(dmic_buf0, dmic_buf1, 512 샘플씩)로 준다. DMIC 기록과 방향만 반대다.
   CFX: 1 ms 마다 dmic_buf[dmic_cur_buf][dmic_pos] 부터 16 샘플을 꺼내 믹서 결과 대신 쓴다.
+       마이크에 입력 LPF (2-tap 이동평균) 가 걸릴 때 (맵 4 번, RTT f) 는 주입 샘플에도 CFX 가 같은 식으로 건다.
        512 를 다 꺼내면 그 버퍼의 dmic_buf_full 0, 다른 버퍼로 옮기며 알린다.
        꺼낼 버퍼가 비어 있으면 그 1 ms 는 무음, dmic_missing_cnt + 1, 그 자리에서 기다린다.
   PC:  알림마다 dmic_buf_full 이 0 인 버퍼를 모두 채우고 1 을 쓴다 (둘 다 비었으면 CFX 가 기다리는 버퍼부터).
@@ -28,7 +29,7 @@ import wave
 from ..blocks.tdc_blocks import TDC_DMIC_LEN
 
 TDC_SINE_FREQS = (1000, 2000, 4000, 6000)     # 동료 DNN 펌웨어 내장 사인 표와 같은 4 개. DMIC 창 목록(ui/tdc_graph_common.py)과 같게 둔다
-TDC_SINE_PEAK = 25166                         # 2^23 * 3146 / 2^20 (DNN td_dnn_cfx.c 의 마이크 수준, 약 -50 dBFS)
+TDC_SINE_PEAK = 25166                         # 2^23 * 3146 / 2^20 (DNN td_dnn_cfx.c 의 마이크 수준, 약 -50 dBFS). src/tdc_wav_convert.py 의 TDC_MIC_PEAK 와 같게 둔다
 TDC_FULL_SCALE = 1 << 23
 TDC_FIFO_BLOCK = 16                           # 1 ms = 16 샘플. 무음 1 ms 를 0 16 개로 보인다 (결정_D71)
 TDC_SILENT_SHOW_MS = 3000                     # 한 번에 0 으로 붙이는 무음의 최대 (ms). DMIC 파형 창(ui/tdc_graph_common.py TDC_DMIC_WAVE_SEC)과 같게 둔다

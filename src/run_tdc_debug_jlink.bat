@@ -1,31 +1,30 @@
 @echo off
 rem run_tdc_debug_jlink.bat - J-Link debug tool launcher (double-click to start).
-rem Runs run_tdc_debug_jlink.py in this folder with Python every time, so edited tool code takes effect
-rem without any build step. Arguments pass through to run_tdc_debug_jlink.py (e.g. --ini other.ini).
-rem Python: TDC_PYTHON (full path to python.exe) if set, else python on PATH, else the py launcher.
+rem Starts run_tdc_debug_jlink.py in this folder with pythonw (no console window), then this window closes at once.
+rem The tool code is read at every start, so edited tool code takes effect without any build step.
+rem Arguments pass through to run_tdc_debug_jlink.py (e.g. --ini other.ini).
+rem Python: TDC_PYTHON (full path to pythonw.exe or python.exe) if set, else pythonw on PATH, else the pyw launcher.
+rem Errors at start are shown in a message box. For console output run:  python run_tdc_debug_jlink.py
 rem ASCII only: cmd.exe reads batch files in the console code page.
 setlocal
-title tdc_debug_jlink
 pushd "%~dp0"
+if defined TDC_PYTHON set "TDC_PYW=%TDC_PYTHON:python.exe=pythonw.exe%"
 
 if defined TDC_PYTHON (
-    "%TDC_PYTHON%" run_tdc_debug_jlink.py %*
+    start "" "%TDC_PYW%" run_tdc_debug_jlink.py %*
 ) else (
-    where python >nul 2>nul
+    where pythonw >nul 2>nul
     if errorlevel 1 (
-        py -3 run_tdc_debug_jlink.py %*
+        where pyw >nul 2>nul
+        if errorlevel 1 (
+            echo [run_tdc_debug_jlink] Python was not found.
+            echo Install 64-bit Python with "Add python.exe to PATH" checked, then run this file again.
+            pause
+        ) else (
+            start "" pyw -3 run_tdc_debug_jlink.py %*
+        )
     ) else (
-        python run_tdc_debug_jlink.py %*
+        start "" pythonw run_tdc_debug_jlink.py %*
     )
 )
-set "TDC_RC=%ERRORLEVEL%"
-
-rem Keep the window open on failure so the error can be read
-if not "%TDC_RC%"=="0" (
-    echo.
-    echo [run_tdc_debug_jlink] stopped with exit code %TDC_RC%.
-    echo If a module is missing, install the packages once:  python -m pip install -r requirements.txt
-    pause
-)
 popd
-exit /b %TDC_RC%
