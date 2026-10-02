@@ -23,6 +23,8 @@ TDC_IDLE_SEC = 0.5           # 이 시간 동안 데이터가 없으면 비활�
 TDC_INJECT_FREQS = (1000, 2000, 4000, 6000)   # DMIC 창 주입 목록 (Hz). features/tdc_inject.py TDC_SINE_FREQS 와 같게 둔다
 TDC_INJECT_CHOICES = tuple("사인 %g kHz" % (f / 1000.0) for f in TDC_INJECT_FREQS)
 TDC_INJECT_WAV = "WAV 파일..."
+TDC_IFFT_SPANS = (("3 s", 3.0), ("300 ms", 0.3), ("30 ms", 0.03), ("10 ms", 0.01))   # IFFT 창의 구간 (글, 초)
+TDC_IFFT_VALUE_SHIFT = 5     # IFFT 블록의 값은 DAC 로 낼 때 << 5 한다 (1.5 AUDIO_INPUT_RSHIFT). 보일 때 같은 만큼 올린다
 TDC_SETTLE_MS = 150          # 창을 옮기거나 크기를 바꾸다 멈춘 뒤 이 시간이 지나면 다시 그린다
 
 

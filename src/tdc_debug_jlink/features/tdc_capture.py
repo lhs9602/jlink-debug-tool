@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-tdc_capture.py - 더블 버퍼 가져오기 (DMIC, vMag 공통)
+tdc_capture.py - 더블 버퍼 가져오기 (DMIC, vMag, IFFT 공통)
 
 펌웨어 규칙 (1.5 tdc_debug_jlink.h 블록 정의 주석):
   main.c 는 블록의 enable 이 1 인 동안만 그 블록의 함수를 부른다 (0 이면 부르지 않는다. 초기값 0).
@@ -36,12 +36,16 @@ def tdc_vmag_frames(values):
 
 class TdcDoubleBuffer:
     """prefix 는 멤버 이름 앞부분 ("dmic" / "vmag"). cur 는 지금 버퍼 번호 멤버의 뒷부분, pos 는 버퍼 안 위치 멤버의 뒷부분
-    (DMIC "cur_buf", "pos" / vMag "write_buf", "write_pos". DMIC 버퍼는 주입도 쓰므로 이름이 다르다, 설계 결정_D70)."""
+    (DMIC "cur_buf", "pos" / vMag "write_buf", "write_pos". DMIC 버퍼는 주입도 쓰므로 이름이 다르다, 설계 결정_D70).
+    bufs 는 함께 읽을 버퍼 이름들, per_buf 는 버퍼 번호마다 하나씩 있는 값의 이름들이다 (IFFT: 기준과 출력, mode_cnt).
+    bufs 가 하나이고 per_buf 가 없으면 take 는 값 리스트를, 아니면 {이름: 값} 을 돌려준다."""
 
-    def __init__(self, prefix, cur, pos):
+    def __init__(self, prefix, cur, pos, bufs=("buf",), per_buf=()):
         self.p = prefix
         self.cur = cur
         self.pos = pos
+        self.bufs = tuple(bufs)
+        self.per_buf = tuple(per_buf)
         self.on = False
         self.n_buf = 0          # 종합 로그 간격 동안 받은 버퍼
         self.missed = 0         # 같은 간격의 놓침 (ms)
@@ -59,11 +63,16 @@ class TdcDoubleBuffer:
         return 0 if f0 else (1 if f1 else None)
 
     def take(self, jl, blk):
-        """찬 버퍼 하나를 가져온다. (값 리스트, 놓친 ms) 또는 None."""
+        """찬 버퍼 하나를 가져온다. (값 리스트 또는 {이름: 값}, 놓친 ms) 또는 None."""
         w = self.pick(jl, blk)
         if w is None:
             return None
-        data = self._m(blk, "buf%d" % w).read(jl)
+        if len(self.bufs) == 1 and not self.per_buf:
+            data = self._m(blk, "%s%d" % (self.bufs[0], w)).read(jl)
+        else:
+            data = {name: self._m(blk, "%s%d" % (name, w)).read(jl) for name in self.bufs}
+            for name in self.per_buf:
+                data[name] = self._m(blk, name).get(jl, w)
         self._m(blk, "buf_full").put(jl, 0, w)
         miss_m = self._m(blk, "missing_cnt")
         miss = miss_m.get(jl)

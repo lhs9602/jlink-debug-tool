@@ -7,6 +7,7 @@ J-Link 는 이 프로세스의 한 스레드만 부른다. 루프 한 바퀴:
   -> RTT (poll_ms 마다) -> 연결 감시 (watch_ms 마다) -> 종합 로그 (log_s 마다)
 창 통로에는 넣기만 하고 기다리지 않는다. 통로가 차면 화면용 데이터는 버린다 (저장 파일은 여기서 써서 빠지지 않는다).
 연결이 끊기면 reconnect_s 마다 다시 연결하고 header 를 다시 읽는다 (결정_D26).
+터미널의 연결 해제 버튼을 누르면 J-Link 를 닫고, 연결 버튼을 누를 때까지 다시 연결하지 않는다 (hold).
 header magic 이 사라졌다가 돌아오면 (펌웨어 재초기화) header 를 다시 읽고 켜 둔 기능을 다시 시작한다.
 """
 
@@ -20,7 +21,7 @@ from ..features.tdc_inject import TDC_SINE_FREQS, TdcInject, TdcInjectError, Tdc
 from ..features.tdc_save import TdcSaver
 from ..link.tdc_memory import TDC_DCRDR, TDC_STATS, tdc_read_word, tdc_stats_reset
 from ..link.tdc_rtt import TdcRtt, TdcRttError
-from .tdc_commands import TDC_HELP, TDC_ID_DMIC, TDC_ID_VMAG, tdc_command
+from .tdc_commands import TDC_CAP_ID, TDC_CAPS, TDC_HELP, TDC_ID_DMIC, TDC_ID_IFFT, TDC_ID_VMAG, tdc_command
 
 
 class TdcStop(Exception):
@@ -30,7 +31,7 @@ class TdcStop(Exception):
 class TdcPerf:
     """명령 perf 의 측정값. 항목마다 횟수, 합, 최대 (초)."""
 
-    KEYS = ("loop", "service", "inject", "dmic", "vmag", "rtt")
+    KEYS = ("loop", "service", "inject", "dmic", "vmag", "ifft", "rtt")
 
     def __init__(self):
         self.reset()
@@ -64,6 +65,7 @@ class TdcPerf:
             "  주입 채움       1 초에 %.0f 번, 평균 %.2f ms" % (rate("inject"), avg("inject")),
             "  DMIC 가져오기   1 초에 %.0f 번, 평균 %.2f ms" % (rate("dmic"), avg("dmic")),
             "  vMag 가져오기   1 초에 %.0f 번, 평균 %.2f ms" % (rate("vmag"), avg("vmag")),
+            "  IFFT 가져오기   1 초에 %.0f 번, 평균 %.2f ms" % (rate("ifft"), avg("ifft")),
             "RTT               평균 %.2f ms" % avg("rtt"),
             "J-Link 읽기       1 초에 %.0f 번, 한 번 평균 %.3f ms (평균 %.0f 워드)" % (
                 s["read_n"] / span, 1000.0 * s["read_s"] / s["read_n"] if s["read_n"] else 0.0,
@@ -89,7 +91,8 @@ class TdcMain:
         self.bind_lines = []
         self.magic = None
         self.rtt = TdcRtt(cfg["rtt_cb"], cfg["rtt_up"], cfg["rtt_down"])
-        self.cap = {"dmic": TdcDoubleBuffer("dmic", "cur_buf", "pos"), "vmag": TdcDoubleBuffer("vmag", "write_buf", "write_pos")}
+        self.cap = {"dmic": TdcDoubleBuffer("dmic", "cur_buf", "pos"), "vmag": TdcDoubleBuffer("vmag", "write_buf", "write_pos"),
+                    "ifft": TdcDoubleBuffer("ifft", "cur_buf", "pos", bufs=("ref_buf", "out_buf"), per_buf=("mode_cnt",))}
         self.inj = TdcInject()
         self.saver = TdcSaver(cfg["out_dir"])
         self.log_s = cfg["log_s"]
@@ -99,6 +102,8 @@ class TdcMain:
         self.last_dcrdr = None
         self.loop_max_gap = 0.0
         self.perf = TdcPerf()
+        self.hold = False           # 사용자가 연결을 해제했다. 참인 동안 J-Link 를 열지 않는다
+        self.retry_now = False      # 연결 버튼: 다시 연결을 기다리는 중이면 바로 시도한다
 
     # ------------------------------------------------------------------ 통로
     def _put(self, q, item):
@@ -121,7 +126,7 @@ class TdcMain:
 
     # ------------------------------------------------------------------ 상태
     def any_on(self):
-        return self.cap["dmic"].on or self.cap["vmag"].on or self.inj.on
+        return self.cap["dmic"].on or self.cap["vmag"].on or self.cap["ifft"].on or self.inj.on
 
     def status_text(self):
         link = ("연결됨 %s" % self.link.describe()) if self.jl is not None else "연결 안 됨"
@@ -129,8 +134,8 @@ class TdcMain:
         dmic = "off"
         if self.cap["dmic"].on:
             dmic = ("on (주입 %s)" % self.inj.source.name) if self.inj.on else "on"
-        return "%s / %s / dmic %s, vmag %s / 저장 %s / 창으로 보낸 것 %d, 버린 것 %d" % (
-            link, blocks, dmic, "on" if self.cap["vmag"].on else "off",
+        return "%s / %s / dmic %s, vmag %s, ifft %s / 저장 %s / 창으로 보낸 것 %d, 버린 것 %d" % (
+            link, blocks, dmic, "on" if self.cap["vmag"].on else "off", "on" if self.cap["ifft"].on else "off",
             "on" if self.saver.on else "off", self.sent, self.dropped)
 
     # ------------------------------------------------------------------ 명령
@@ -148,11 +153,25 @@ class TdcMain:
                 tdc_command(self, text)
             elif kind == "dmic_inject":
                 self.inject_request(text)          # DMIC 창의 주입 조작 (결정_D76)
+            elif kind == "link":
+                self.link_request(text)            # 터미널의 연결 해제, 연결 버튼
+
+    def link_request(self, onoff):
+        """"off": J-Link 를 닫고 다시 연결하지 않는다. "on": 다시 연결한다.
+        켜 둔 기능 (capture, 주입) 은 disconnect 가 타깃에서 끄고, 다시 연결하면 이어서 시작한다"""
+        if onoff == "off":
+            self.hold = True
+            self.disconnect()
+            self.term("status", "연결 해제됨")
+            self.term("rtt_note", "연결 해제됨")
+        else:
+            self.hold = False
+            self.retry_now = True
 
     # ------------------------------------------------------------------ 기능
     def start_capture(self, what):
         cap = self.cap[what]
-        blk = self.bound[TDC_ID_DMIC if what == "dmic" else TDC_ID_VMAG]
+        blk = self.bound[TDC_CAP_ID[what]]
         # 펌웨어는 블록의 enable 이 1 인 동안만 그 블록의 함수를 부른다. 블록을 처음 상태로 두고 enable 을 1 로 쓴다 (초기화는 PC).
         # 주입 중이면 DMIC 버퍼에 주입 샘플이 있어 처음 상태로 돌리지 않고 enable 만 1 로 둔다.
         # 그런 경로는 셋이다: 다시 연결한 뒤, 펌웨어 재초기화 뒤 (둘 다 바로 뒤에 주입을 다시 시작한다),
@@ -163,14 +182,14 @@ class TdcMain:
             cap.start(self.jl, blk)
         cap.on = True
         self.last_dcrdr = tdc_read_word(self.jl, TDC_DCRDR)
-        (self.saver.open_dmic if what == "dmic" else self.saver.open_vmag)()
+        getattr(self.saver, "open_" + what)()
         if what == "dmic":
             self.inject_state()
 
     def stop_capture(self, what):
         """가져오기 끄기: enable 0. 펌웨어가 그 블록의 함수를 부르지 않게 된다."""
         cap = self.cap[what]
-        bid = TDC_ID_DMIC if what == "dmic" else TDC_ID_VMAG
+        bid = TDC_CAP_ID[what]
         if self.jl is not None and bid in self.bound:
             cap.stop(self.jl, self.bound[bid])
         cap.on = False
@@ -258,22 +277,35 @@ class TdcMain:
                 frames = tdc_vmag_frames(data)
                 self.saver.vmag(frames)
                 self.to_window("vmag", ("frames", frames))
+        if self.cap["ifft"].on and TDC_ID_IFFT in self.bound:
+            t0 = time.perf_counter()
+            got = self.cap["ifft"].take_all(jl, self.bound[TDC_ID_IFFT])
+            if got:
+                self.perf.add("ifft", time.perf_counter() - t0)
+            for data, miss in got:
+                # 기준과 출력은 같은 위치의 16 샘플 묶음이 같은 1 ms 다. 묶음 안은 DMIC 처럼 [0] 이 가장 최근이라 뒤집는다
+                ref = tdc_dmic_time_order(data["ref_buf"])
+                out = tdc_dmic_time_order(data["out_buf"])
+                self.saver.ifft(ref, out)
+                self.to_window("ifft", ("ifft", (ref, out, data["mode_cnt"], miss)))
         self.perf.add("service", time.perf_counter() - t_start)
 
     def summary(self):
-        """종합 로그 (결정_D64, D77). 받은 버퍼 수는 내지 않는다 (1 초에 31, 32 가 번갈아 나와 놓친 것처럼 보인다).
-        그 간격에 받은 것이 없으면 "받은 것 없음", 주입은 "채움 없음" 으로 낸다 (멈춘 것을 알 수 있게)."""
+        """종합 로그 (결정_D64, D77). 그 간격에 놓친 샘플이 있는 것만 낸다. 놓친 것이 없으면 줄을 내지 않는다."""
         parts = []
         if self.cap["dmic"].on:
-            n, m = self.cap["dmic"].reset_interval()
+            _n, m = self.cap["dmic"].reset_interval()
             if self.inj.on:
-                n, m = self.inj.reset_interval()
-                parts.append(("dmic 주입 무음 %d ms" % m) if n else "dmic 주입 채움 없음")
-            else:
-                parts.append(("dmic 놓침 %d ms" % m) if n else "dmic 받은 것 없음")
-        if self.cap["vmag"].on:
-            n, m = self.cap["vmag"].reset_interval()
-            parts.append(("vmag 놓침 %d ms" % m) if n else "vmag 받은 것 없음")
+                _n, m = self.inj.reset_interval()
+                if m:
+                    parts.append("dmic 주입 무음 %d ms" % m)
+            elif m:
+                parts.append("dmic 놓침 %d ms" % m)
+        for key in ("vmag", "ifft"):
+            if self.cap[key].on:
+                _n, m = self.cap[key].reset_interval()
+                if m:
+                    parts.append("%s 놓침 %d ms" % (key, m))
         if parts:
             self.term("log", "[%d s] %s\n" % (self.log_s, " | ".join(parts)))
 
@@ -288,12 +320,12 @@ class TdcMain:
             self.inj.stop(self.jl, self.bound[TDC_ID_DMIC])
             self.reply("주입이 켜진 채 남아 있어 껐다 (지난 도구가 끄지 못함)")
         # 가져오기도 같다: 켜 두지 않았는데 enable 이 1 이면 끈다 (펌웨어가 쓰지 않는 블록을 돌리지 않게)
-        for key, bid in (("dmic", TDC_ID_DMIC), ("vmag", TDC_ID_VMAG)):
+        for key, bid, _name in TDC_CAPS:
             if not self.cap[key].on and bid in self.bound and getattr(self.bound[bid].m, key + "_enable").get(self.jl) != 0:
                 self.cap[key].stop(self.jl, self.bound[bid])
                 self.reply("capture %s 이 켜진 채 남아 있어 껐다 (지난 도구가 끄지 못함)" % key)
         # 켜 둔 기능을 다시 시작한다 (재연결, 펌웨어 재초기화 뒤)
-        for key, bid in (("dmic", TDC_ID_DMIC), ("vmag", TDC_ID_VMAG)):
+        for key, bid, _name in TDC_CAPS:
             if self.cap[key].on:
                 if bid in self.bound:
                     self.start_capture(key)
@@ -343,7 +375,7 @@ class TdcMain:
             self.magic = magic
         # 펌웨어가 디버그 블록을 다시 초기화하면 (standby 복귀) enable 이 0 으로 돌아간다. 초기화가 짧아 magic 이
         # 사라진 것을 놓칠 수 있으므로, 켜 둔 블록의 enable 을 되읽어 0 이면 다시 시작한다
-        for key, bid in (("dmic", TDC_ID_DMIC), ("vmag", TDC_ID_VMAG)):
+        for key, bid, _name in TDC_CAPS:
             if self.cap[key].on and bid in self.bound and getattr(self.bound[bid].m, key + "_enable").get(jl) == 0:
                 self.reply("펌웨어 재초기화 감지 -> capture %s 다시 시작" % key)
                 self.start_capture(key)
@@ -357,7 +389,7 @@ class TdcMain:
                 if self.inj.on and TDC_ID_DMIC in self.bound:
                     self.inj.stop(self.jl, self.bound[TDC_ID_DMIC])
                     self.inj.on = True        # 다시 연결하면 이어서 시작한다
-                for key, bid in (("dmic", TDC_ID_DMIC), ("vmag", TDC_ID_VMAG)):
+                for key, bid, _name in TDC_CAPS:
                     if self.cap[key].on and bid in self.bound:
                         self.cap[key].stop(self.jl, self.bound[bid])    # enable 0. on 은 그대로라 다시 연결하면 이어서 시작한다
             except Exception:
@@ -408,16 +440,22 @@ class TdcMain:
         try:
             while not self.stop_evt.is_set():
                 try:
+                    while self.hold and not self.stop_evt.is_set():     # 연결 해제 중: 명령만 받는다
+                        self.handle_commands()
+                        time.sleep(0.05)
+                    self.retry_now = False
                     self.connect()
                     self.loop()
                 except TdcStop:
                     raise
                 except Exception as e:           # 연결, 통신 문제: 닫고 다시 연결
+                    self.disconnect()
+                    if self.hold:                # 닫는 중에 난 오류: 해제된 채로 둔다
+                        continue
                     self.term("status", "끊김: %s (%.1f s 뒤 다시)" % (e, self.cfg["reconnect_s"]))
                     self.term("rtt_note", "끊김: %s (%.1f s 뒤 다시)" % (e, self.cfg["reconnect_s"]))
-                    self.disconnect()
                     end = time.perf_counter() + self.cfg["reconnect_s"]
-                    while time.perf_counter() < end and not self.stop_evt.is_set():
+                    while time.perf_counter() < end and not self.stop_evt.is_set() and not self.hold and not self.retry_now:
                         self.handle_commands()
                         time.sleep(0.05)
         except TdcStop:
@@ -434,15 +472,16 @@ class TdcMain:
             self.disconnect()
 
     def print_selftest(self):
-        d, v = self.cap["dmic"], self.cap["vmag"]
-        print("selftest main: dmic 버퍼 %d 놓침 %d ms | vmag 버퍼 %d 놓침 %d ms | 주입 채움 %d 무음 %d ms | "
+        d, v, f = self.cap["dmic"], self.cap["vmag"], self.cap["ifft"]
+        print("selftest main: dmic 버퍼 %d 놓침 %d ms | vmag 버퍼 %d 놓침 %d ms | ifft 버퍼 %d 놓침 %d ms | 주입 채움 %d 무음 %d ms | "
               "write 명령 뒤 타깃 쓰기 %d 회 | 저장 %s | 루프 최대 간격 %.1f ms" % (
-                  d.total_buf, d.total_missed, v.total_buf, v.total_missed, self.inj.total_fill, self.inj.total_silent,
+                  d.total_buf, d.total_missed, v.total_buf, v.total_missed, f.total_buf, f.total_missed,
+                  self.inj.total_fill, self.inj.total_silent,
                   self.user_write_calls, [p.replace("\\", "/").split("/")[-1] for p in self.saver.names],
                   self.loop_max_gap * 1000.0), flush=True)
 
 
-def tdc_main_process(cfg, fake, to_term, from_term, to_dmic, to_vmag, stop_evt, selftest):
+def tdc_main_process(cfg, fake, to_term, from_term, to_dmic, to_vmag, to_ifft, stop_evt, selftest):
     """main 프로세스 시작 함수 (multiprocessing 대상이라 모듈 최상위에 둔다)."""
     if fake:
         from ..link.tdc_fake_link import TdcFakeLink
@@ -450,4 +489,4 @@ def tdc_main_process(cfg, fake, to_term, from_term, to_dmic, to_vmag, stop_evt, 
     else:
         from ..link.tdc_link import TdcLink
         link = TdcLink(cfg)
-    TdcMain(cfg, link, to_term, from_term, {"dmic": to_dmic, "vmag": to_vmag}, stop_evt, selftest).run()
+    TdcMain(cfg, link, to_term, from_term, {"dmic": to_dmic, "vmag": to_vmag, "ifft": to_ifft}, stop_evt, selftest).run()

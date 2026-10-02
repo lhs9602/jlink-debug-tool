@@ -51,6 +51,7 @@ void tdc_debug_jlink_register(void)
     /* 등록: 항목 번호, 블록 번호, 영역 안 이름 */
     TDC_DEBUG_JLINK_ENTRY(0, TDC_DEBUG_JLINK_ID_DMIC, dmic);
     TDC_DEBUG_JLINK_ENTRY(1, TDC_DEBUG_JLINK_ID_VMAG, vmag);
+    TDC_DEBUG_JLINK_ENTRY(2, TDC_DEBUG_JLINK_ID_IFFT, ifft);
 
     /* DMIC 멤버 표: 순번, 시작 칸, 칸 수 */
     TDC_DEBUG_JLINK_TABLE(dmic);
@@ -72,6 +73,19 @@ void tdc_debug_jlink_register(void)
     TDC_DEBUG_JLINK_MEMBER(vmag, 4, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_vmag_t, vmag_buf), TDC_DEBUG_JLINK_VMAG_LEN);
     TDC_DEBUG_JLINK_MEMBER(vmag, 5, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_vmag_t, vmag_buf) + TDC_DEBUG_JLINK_VMAG_LEN, TDC_DEBUG_JLINK_VMAG_LEN);
     TDC_DEBUG_JLINK_MEMBER(vmag, 6, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_vmag_t, vmag_enable), 1);
+
+    /* IFFT 멤버 표 */
+    TDC_DEBUG_JLINK_TABLE(ifft);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 0, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_buf_full), 2);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 1, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_pos), 1);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 2, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_cur_buf), 1);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 3, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_missing_cnt), 1);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 4, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_ref_buf), TDC_DEBUG_JLINK_IFFT_LEN);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 5, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_ref_buf) + TDC_DEBUG_JLINK_IFFT_LEN, TDC_DEBUG_JLINK_IFFT_LEN);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 6, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_out_buf), TDC_DEBUG_JLINK_IFFT_LEN);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 7, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_out_buf) + TDC_DEBUG_JLINK_IFFT_LEN, TDC_DEBUG_JLINK_IFFT_LEN);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 8, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_mode_cnt), 2);
+    TDC_DEBUG_JLINK_MEMBER(ifft, 9, TDC_DEBUG_JLINK_WOFF(tdc_debug_jlink_ifft_t, ifft_enable), 1);
 }
 
 /* ---------------------------------------------------------------------------
@@ -244,6 +258,58 @@ void tdc_debug_jlink_vmag_capture(void)
     else
     {
         TDC_DEBUG_JLINK_AREA->vmag.vmag_write_pos = local_pos;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * 블록 3: IFFT (기준 = AGC 출력, 출력 = DAC 로 낸 16 샘플. 같은 위치에 나란히 쓰는 더블 버퍼)
+ * ------------------------------------------------------------------------- */
+
+/* 1 ms 처리의 맨 끝에서 부른다 (ifft_enable 1 일 때만, main.c).
+ * p_ref: 기준 16 샘플 (기존 경로가 DAC 로 내는 것), p_out: 이번 1 ms 에 DAC 로 낸 16 샘플. 둘 다 main.c 가 넘긴다.
+ * ifft_on 은 이번 1 ms 가 IFFT 오디오 모드였는지 */
+void tdc_debug_jlink_ifft_capture(int _XMEM *p_ref, int _XMEM *p_out, int ifft_on)
+{
+    int w = TDC_DEBUG_JLINK_AREA->ifft.ifft_cur_buf;
+
+    if (TDC_DEBUG_JLINK_AREA->ifft.ifft_buf_full[w] != 0)
+    {
+        /* 두 버퍼가 다 찼다 (PC 가 아직 읽지 않았다). 이번 1 ms 는 기록되지 않는다 */
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_missing_cnt++;
+        return;
+    }
+
+    int local_pos = TDC_DEBUG_JLINK_AREA->ifft.ifft_pos;
+
+    if (local_pos == 0)
+    {
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_mode_cnt[w] = 0; /* 이 버퍼를 처음부터 채운다 */
+    }
+
+    if (ifft_on)
+    {
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_mode_cnt[w]++;
+    }
+
+    for (register int i = 0; i < df_inputADC_DataBuffLength; i++)
+        chess_loop_range(df_inputADC_DataBuffLength, df_inputADC_DataBuffLength)
+        {
+            TDC_DEBUG_JLINK_AREA->ifft.ifft_ref_buf[w][local_pos + i] = p_ref[i];
+            TDC_DEBUG_JLINK_AREA->ifft.ifft_out_buf[w][local_pos + i] = p_out[i];
+        }
+
+    local_pos = local_pos + df_inputADC_DataBuffLength;
+
+    if (local_pos >= TDC_DEBUG_JLINK_IFFT_LEN)
+    {
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_pos         = 0;
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_buf_full[w] = 1;     /* 다 찼다. PC 가 읽고 0 을 쓴다 */
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_cur_buf     = 1 - w; /* 다른 버퍼로 옮겨 이어 쓴다 */
+        TDC_DEBUG_JLINK_NOTIFY();                            /* flag 를 세운 뒤에 알린다 */
+    }
+    else
+    {
+        TDC_DEBUG_JLINK_AREA->ifft.ifft_pos = local_pos;
     }
 }
 

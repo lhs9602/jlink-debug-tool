@@ -43,14 +43,16 @@
 /* (1) 블록 번호 */
 #define TDC_DEBUG_JLINK_ID_DMIC   1
 #define TDC_DEBUG_JLINK_ID_VMAG   2 /* 2026-09-30 주입을 DMIC 에 합치며 3 -> 2 (배포 전이라 당겼다) */
+#define TDC_DEBUG_JLINK_ID_IFFT   3
 
 /* 영역에 넣은 블록 수 (등록 줄 TDC_DEBUG_JLINK_ENTRY 의 수) */
-#define TDC_DEBUG_JLINK_ENTRY_N 2
+#define TDC_DEBUG_JLINK_ENTRY_N 3
 
 /* 블록 크기 */
 #define TDC_DEBUG_JLINK_DMIC_LEN          512 /* DMIC 버퍼 하나의 샘플 수 (32 ms). 기록과 주입이 같이 쓴다 */
 #define TDC_DEBUG_JLINK_VMAG_BANDS        df_MaxNumOfElectrode             /* 1 ms 에 쓰는 밴드 대표값 수 (32) */
 #define TDC_DEBUG_JLINK_VMAG_LEN          (16 * TDC_DEBUG_JLINK_VMAG_BANDS) /* vMag 버퍼 하나 = 16 프레임 (512 칸, 16 ms) */
+#define TDC_DEBUG_JLINK_IFFT_LEN          512 /* IFFT 버퍼 하나의 샘플 수 (32 ms). 기준과 출력이 같은 길이다 */
 
 /* 멤버 표 항목. offset = 블록 시작(table_size 칸)에서 몇 칸 뒤, count = 칸 수 */
 typedef struct
@@ -129,6 +131,33 @@ typedef struct
     int                      vmag_enable;                               /* 6  PC: 1 사용, 0 사용 안 함 (0 이면 main.c 가 vMag 함수를 부르지 않는다) */
 } tdc_debug_jlink_vmag_t;
 
+/* (2-1) IFFT (번호 3). 기준과 출력을 같은 위치에 나란히 쓰는 더블 버퍼. 핸드셰이크는 DMIC 기록과 같다
+ * - PC 가 쓰는 동안 (ifft_enable 1) 만 main.c 가 tdc_debug_jlink_ifft_capture() 를 부른다. 0 이면 부르지 않는다.
+ *   기준과 출력의 위치는 main.c 가 넘긴다 (이 블록은 AGC 와 IFFT 오디오 모듈을 알지 못한다).
+ * - 1 ms 마다 기준 16 샘플 (AGC 출력) 과 출력 16 샘플 (DAC 로 낸 것) 을 ifft_ref_buf, ifft_out_buf 의 같은 위치에 쓴다.
+ *   기존 경로의 1 ms 에는 출력이 AGC 출력 그대로다. IFFT 오디오 모드의 1 ms 에는 중첩 합산이 끝난 16 샘플이다
+ *   (기준보다 496 샘플 늦은 소리다. 맞추는 것은 PC 가 한다).
+ * - 값은 lib_loopback_AGC_out() 에 넘기는 것 그대로다 (Q24.0, << 5 전). 16 샘플은 [0] 이 가장 최근이다.
+ * - ifft_mode_cnt[w] 는 버퍼 w 를 채운 32 번 가운데 IFFT 오디오 모드였던 횟수다 (버퍼의 처음을 쓸 때 0 부터).
+ * - 512 가 차면 ifft_buf_full[w] 를 1 로 두고 다른 버퍼로 옮기며 CM3 에 알린다. 두 버퍼가 다 차 있으면 쓰지 않고
+ *   ifft_missing_cnt 를 1 늘린다.
+ * - 켜기 (PC): ifft_enable 0 -> 2 ms 기다림 -> ifft_buf_full 0, 0, ifft_pos 0, ifft_cur_buf 0, ifft_missing_cnt 0 -> ifft_enable 1.
+ *   끄기 (PC): ifft_enable 0.
+ * - TDC_1_POLE_IIR_LPF_ENABLE 이 1 인 빌드에서 필터를 탄 1 ms 는 DAC 로 Mix 버퍼가 나가지만 여기에는 AGC 출력을 쓴다. */
+typedef struct
+{
+    unsigned int             table_size;
+    tdc_debug_jlink_member_t table[10];
+    int                      ifft_buf_full[2];                          /* 0     CFX 가 1 (버퍼가 찼다), PC 가 0 */
+    int                      ifft_pos;                                  /* 1     지금 버퍼 안의 다음 위치 (0 ~ 511) */
+    int                      ifft_cur_buf;                              /* 2     지금 쓰는 버퍼 (0 / 1) */
+    unsigned int             ifft_missing_cnt;                          /* 3     두 버퍼가 다 차서 기록하지 못한 1 ms 횟수 */
+    int                      ifft_ref_buf[2][TDC_DEBUG_JLINK_IFFT_LEN]; /* 4, 5  기준: AGC 출력 */
+    int                      ifft_out_buf[2][TDC_DEBUG_JLINK_IFFT_LEN]; /* 6, 7  출력: DAC 로 낸 것 */
+    int                      ifft_mode_cnt[2];                          /* 8     그 버퍼에서 IFFT 오디오 모드였던 1 ms 횟수 (0 ~ 32) */
+    int                      ifft_enable;                               /* 9     PC: 1 사용, 0 사용 안 함 */
+} tdc_debug_jlink_ifft_t;
+
 /* (3) 영역. 적은 순서가 곧 메모리 순서다. 새 블록은 맨 끝에 적는다.
  *
  *   시작 주소 (CFX P:0x64000 = CM3 0x21010000)
@@ -139,6 +168,8 @@ typedef struct
  *   +------------------------+
  *   | vmag    (번호 2)        |
  *   +------------------------+
+ *   | ifft    (번호 3)        |
+ *   +------------------------+
  *   | (새 블록은 여기)        |
  */
 typedef struct
@@ -146,6 +177,7 @@ typedef struct
     tdc_debug_jlink_header_t header; /* 맨 앞 */
     tdc_debug_jlink_dmic_t   dmic;
     tdc_debug_jlink_vmag_t   vmag;
+    tdc_debug_jlink_ifft_t   ifft;
 } tdc_debug_jlink_area_t;
 
 /* 견본: 따라 만드는 예시 블록 (번호 99, 실제 영역에는 넣지 않는다)
@@ -209,5 +241,6 @@ void tdc_debug_jlink_register(void);
 /* 블록 동작 (main.c 에서 부른다. 그 블록의 enable 이 1 일 때만 부른다) */
 void tdc_debug_jlink_dmic(int use_earpiece); /* 믹서 다음, dmic_enable 1 일 때: dmic_inj_enable 0 이면 입력 FIFO 16 샘플 기록, 1 이면 믹서 결과를 주입 샘플로 바꾼다 */
 void tdc_debug_jlink_vmag_capture(void);     /* 대표값 계산 뒤 (분기 맨 아래), vmag_enable 1 일 때: 32 개 기록 */
+void tdc_debug_jlink_ifft_capture(int _XMEM *p_ref, int _XMEM *p_out, int ifft_on); /* 1 ms 처리의 맨 끝, ifft_enable 1 일 때: p_ref 16 개와 p_out 16 개 기록. ifft_on 은 이번 1 ms 가 IFFT 오디오 모드였는지 */
 
 #endif  // __tdc_debug_jlink_h__

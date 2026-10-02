@@ -3,6 +3,8 @@
 tdc_save.py - 가져온 데이터 파일 저장 (명령 save on|off, 기본 끔)
 
 DMIC: WAV 16 kHz 모노 24 비트 (시간 순서로 되돌린 값). vMag: CSV (시각, 프레임 번호, 밴드 32 개).
+IFFT: WAV 16 kHz 2 채널 24 비트 (채널 1 기준 = AGC 출력, 채널 2 출력 = DAC 로 낸 것. 받은 그대로, 지연을 맞추지 않는다).
+      값은 DAC 로 낼 때처럼 << 5 하고 24 비트로 자른다.
 파일은 가져오기를 켠 채 save on 을 할 때, 또는 save on 상태에서 가져오기를 켤 때 연다.
 """
 
@@ -17,6 +19,7 @@ class TdcSaver:
         self.on = False
         self.wav = None
         self.csv = None
+        self.ifft_wav = None
         self.vmag_n = 0
         self.names = []
 
@@ -45,6 +48,24 @@ class TdcSaver:
             return path
         return None
 
+    def open_ifft(self):
+        if self.on and self.ifft_wav is None:
+            path = self._path("ifft", "wav")
+            self.ifft_wav = wave.open(path, "wb")
+            self.ifft_wav.setnchannels(2)
+            self.ifft_wav.setsampwidth(3)
+            self.ifft_wav.setframerate(16000)
+            self.names.append(path)
+            return path
+        return None
+
+    def ifft(self, ref, out):
+        if self.ifft_wav is not None:
+            lim = (1 << 23) - 1
+            self.ifft_wav.writeframes(b"".join(
+                (max(-lim - 1, min(lim, int(v) << 5)) & 0xFFFFFF).to_bytes(3, "little")
+                for pair in zip(ref, out) for v in pair))
+
     def dmic(self, samples):
         if self.wav is not None:
             self.wav.writeframes(b"".join((int(v) & 0xFFFFFF).to_bytes(3, "little") for v in samples))
@@ -66,6 +87,12 @@ class TdcSaver:
             self.csv.close()
             self.csv = None
 
+    def close_ifft(self):
+        if self.ifft_wav is not None:
+            self.ifft_wav.close()
+            self.ifft_wav = None
+
     def close_all(self):
         self.close_dmic()
         self.close_vmag()
+        self.close_ifft()

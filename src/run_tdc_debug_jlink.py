@@ -58,11 +58,13 @@ def main(argv=None):
     from_term = mp.Queue(TDC_QUEUE_MAX)
     to_dmic = mp.Queue(TDC_QUEUE_MAX)
     to_vmag = mp.Queue(TDC_QUEUE_MAX)
+    to_ifft = mp.Queue(TDC_QUEUE_MAX)
     stop_evt = mp.Event()
     main_proc = mp.Process(target=tdc_main_process,
-                           args=(cfg, fake, to_term, from_term, to_dmic, to_vmag, stop_evt, selftest), daemon=True)
+                           args=(cfg, fake, to_term, from_term, to_dmic, to_vmag, to_ifft, stop_evt, selftest),
+                           daemon=True)
     main_proc.start()
-    tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, selftest,
+    tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, to_ifft, main_proc, stop_evt, selftest,
                      " (가짜 타깃)" if fake else "")
     return 0
 

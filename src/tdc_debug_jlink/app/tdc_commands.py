@@ -17,8 +17,9 @@ TDC_HELP_PYLINK = (
     "  capture dmic on|off       DMIC 가져오기. 켜면 DMIC 창이 열리고, 창을 닫으면 꺼진다\n"
     "                            주입은 DMIC 창에서 켜고 끈다 (사인 1/2/4/6 kHz, WAV 16 kHz 모노)\n"
     "  capture vmag on|off       vMag 가져오기. 켜면 vMag 창이 열리고, 창을 닫으면 꺼진다\n"
-    "  save on|off               가져온 데이터 파일 저장 (DMIC WAV, vMag CSV). 기본 off\n"
-    "  log N                     종합 로그 간격 (초). 동작 중일 때만 나온다\n"
+    "  capture ifft on|off       IFFT 비교 (AGC 출력과 DAC 출력). 켜면 IFFT 창이 열리고, 창을 닫으면 꺼진다\n"
+    "  save on|off               가져온 데이터 파일 저장 (DMIC WAV, vMag CSV, IFFT 2 채널 WAV). 기본 off\n"
+    "  log N                     종합 로그 간격 (초). 놓친 샘플이 있을 때만 나온다\n"
     "  perf                      측정: 루프, 알림 처리, J-Link 호출 시간 (지난 perf 뒤). 보고 나면 0 부터\n"
 )
 
@@ -33,6 +34,7 @@ TDC_HELP_RTT = (
     "  t                         무결성 오류 이벤트 로그 쓰기\n"
     "  f                         오디오 입력 LPF (2-tap 이동평균) 켜고 끄기. 맵 4 번은 항상 켠다\n"
     "  v                         vMag cos 가중 켜고 끄기\n"
+    "  i                         IFFT 오디오 모드 켜고 끄기\n"
     "  m                         지금 자극에 쓰는 맵 값 출력\n"
     "  d                         LPF 전후 16 샘플 덤프 요청 (1 차 IIR 빌드에서만)\n"
 )
@@ -41,6 +43,11 @@ TDC_HELP = TDC_HELP_PYLINK + "\n" + TDC_HELP_RTT
 
 TDC_ID_DMIC = 1
 TDC_ID_VMAG = 2
+TDC_ID_IFFT = 3
+
+# 가져오기: (명령과 통로의 이름, 블록 번호, 보이는 이름). 블록의 켜고 끄는 멤버는 <이름>_enable 이다
+TDC_CAPS = (("dmic", TDC_ID_DMIC, "DMIC"), ("vmag", TDC_ID_VMAG, "vMag"), ("ifft", TDC_ID_IFFT, "IFFT"))
+TDC_CAP_ID = {key: bid for key, bid, _name in TDC_CAPS}
 
 
 def _num(s):
@@ -74,7 +81,7 @@ def _need_block(main, bid, line):
         return None
     blk = main.bound.get(bid)
     if blk is None:
-        name = {TDC_ID_DMIC: "DMIC", TDC_ID_VMAG: "vMag"}[bid]
+        name = {b: n for _key, b, n in TDC_CAPS}[bid]
         main.reply("%s: %s(id %d) 사용 불가" % (line, name, bid))
     return blk
 
@@ -121,17 +128,17 @@ def _write(main, words, line):
 
 def _capture(main, words, line):
     what, onoff = words[1].lower(), words[2].lower()
-    if what not in ("dmic", "vmag") or onoff not in ("on", "off"):
+    if what not in TDC_CAP_ID or onoff not in ("on", "off"):
         raise ValueError
     if onoff == "off":
         if what == "dmic" and main.inj.on:
             main.stop_inject()                  # 주입은 DMIC 의 옵션이라 함께 끈다 (결정_D76)
             main.reply("주입 끔")
         main.stop_capture(what)                 # enable 0: 펌웨어가 그 블록의 함수를 부르지 않는다
-        (main.saver.close_dmic if what == "dmic" else main.saver.close_vmag)()
+        getattr(main.saver, "close_" + what)()
         main.reply("capture %s off" % what)
         return
-    blk = _need_block(main, TDC_ID_DMIC if what == "dmic" else TDC_ID_VMAG, line)
+    blk = _need_block(main, TDC_CAP_ID[what], line)
     if blk is None:
         return
     main.start_capture(what)
@@ -148,6 +155,8 @@ def _save(main, words, line):
             opened.append(main.saver.open_dmic())
         if main.cap["vmag"].on:
             opened.append(main.saver.open_vmag())
+        if main.cap["ifft"].on:
+            opened.append(main.saver.open_ifft())
         opened = [p for p in opened if p]
         main.reply("save on" + ("" if not opened else ": " + ", ".join(opened)))
     elif onoff == "off":

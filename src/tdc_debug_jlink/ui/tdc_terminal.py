@@ -16,6 +16,7 @@ import queue
 import re
 
 from .tdc_dmic_window import tdc_dmic_window
+from .tdc_ifft_window import tdc_ifft_window
 from .tdc_vmag_window import tdc_vmag_window
 
 # RTT 글의 ANSI 색 코드 (1.5 SEGGER_RTT.h RTT_CTRL_*: ESC[0m 초기화, ESC[2;3xm 보통, ESC[1;3xm 밝게).
@@ -43,6 +44,7 @@ TDC_SELFTEST_COMMANDS = (
     (1200, "write 0x21010000 1"),
     (1400, "capture dmic on"),
     (1600, "capture vmag on"),
+    (1800, "capture ifft on"),
     (2000, "save on"),
     (2200, "log 2"),
     (6500, "save off"),
@@ -50,13 +52,14 @@ TDC_SELFTEST_COMMANDS = (
 )
 
 
-def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, selftest=False, title_note=""):
+def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, to_ifft, main_proc, stop_evt, selftest=False, title_note=""):
     import tkinter as tk
     from tkinter import ttk
 
     # 기능마다 창 (프로세스) 하나. 새 기능의 창은 여기에 한 줄 더한다
     windows = {"dmic": {"target": tdc_dmic_window, "queue": to_dmic, "proc": None, "name": "DMIC"},
-               "vmag": {"target": tdc_vmag_window, "queue": to_vmag, "proc": None, "name": "vMag"}}
+               "vmag": {"target": tdc_vmag_window, "queue": to_vmag, "proc": None, "name": "vMag"},
+               "ifft": {"target": tdc_ifft_window, "queue": to_ifft, "proc": None, "name": "IFFT"}}
 
     root = tk.Tk()
     root.title("RTT + pylink 터미널" + title_note)
@@ -76,6 +79,18 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
     dot.pack(side="left", padx=(8, 6))
     status = tk.Label(bar, text="연결 중", anchor="w", bg=TDC_UI["head"], fg=TDC_UI["dim"], font=TDC_UI_FONT, pady=3)
     status.pack(side="left", fill="x", expand=True)
+    # 상태 줄 오른쪽의 연결 버튼. 연결 해제: main 이 J-Link 를 닫고 다시 연결하지 않는다. 연결: 다시 연결한다
+    link_held = {"on": False}
+
+    def on_link():
+        link_held["on"] = not link_held["on"]
+        link_btn.configure(text="연결" if link_held["on"] else "연결 해제")
+        send(("link", "off" if link_held["on"] else "on"))
+
+    link_btn = tk.Button(bar, text="연결 해제", command=on_link, bg=TDC_UI["head"], fg=TDC_UI["fg"], font=TDC_UI_FONT,
+                         activebackground=TDC_UI["thumb"], activeforeground=TDC_UI["fg"], relief="flat", bd=0, padx=10,
+                         takefocus=0, cursor="hand2")
+    link_btn.pack(side="right", padx=4)
 
     def set_status(s):
         if s.startswith("연결됨"):
@@ -115,6 +130,11 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
         scroll.pack(side="right", fill="y")
         text.pack(side="left", fill="both", expand=True)
 
+        # 제목 줄 오른쪽의 지우기: 그 터미널에 쌓인 글을 모두 지운다 (화면만. 로그 파일과 타깃에는 영향이 없다)
+        tk.Button(head, text="지우기", command=lambda: clear(text), bg=ui["head"], fg=ui["dim"], font=TDC_UI_FONT,
+                  activebackground=ui["thumb"], activeforeground=ui["fg"], relief="flat", bd=0, padx=8,
+                  takefocus=0, cursor="hand2").pack(side="right", padx=4)
+
         text.bind("<Button-1>", lambda _e: text.focus_set())
         if key_mode:
             def key(event):
@@ -148,6 +168,12 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
             return
         root.clipboard_clear()
         root.clipboard_append(sel)
+
+    def clear(text_widget):
+        """글 상자의 글을 모두 지운다"""
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+        text_widget.configure(state="disabled")
 
     follow = set()      # 글이 붙은 글 상자 가운데 맨 아래로 내릴 것. scroll_down 이 한 번에 내린다
 
@@ -312,6 +338,7 @@ def tdc_terminal_run(to_term, from_term, to_dmic, to_vmag, main_proc, stop_evt, 
     root.after(20, tick)
     if selftest:
         root.after(600, lambda: on_rtt("v"))
+        root.after(5200, lambda: on_rtt("i"))       # IFFT 창이 떠 있는 동안 IFFT 오디오 모드를 켠다 (가짜 타깃)
         for ms, line in TDC_SELFTEST_COMMANDS:
             root.after(ms, lambda s=line: on_cmd(s))
         root.after(9800, lambda: print("selftest terminal: auto off %s, main alive %s" % (
